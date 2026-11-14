@@ -26,7 +26,8 @@ public class UI_SignUp {
 
         String placa = leerDato("Ingrese la placa del vehiculo.")
                 .toUpperCase(Locale.ROOT);
-        String tipoVehiculo = leerDato("Ingrese el tipo de vehiculo.");
+        String tipoVehiculo = leerDato("Ingrese el tipo de vehiculo (CARRO, MOTO).")
+                .toUpperCase(Locale.ROOT);
 
         return new Usuario(cedula, nombre, tipo, placa, tipoVehiculo);
     }
