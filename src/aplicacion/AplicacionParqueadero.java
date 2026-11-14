@@ -13,11 +13,19 @@ import entidades.Autorizacion;
 import entidades.Constancia;
 import entidades.Solicitud;
 import entidades.Usuario;
-import negocio.ResultadoIngreso;
 import negocio.ServicioAcceso;
 import negocio.ServicioAutorizacion;
 import negocio.ServicioIngreso;
 import negocio.ServicioSalida;
+import presentacion.UI_Asignacion;
+import presentacion.UI_FormularioSolicitud;
+import presentacion.UI_Home;
+import presentacion.UI_LecturaQR;
+import presentacion.UI_Login;
+import presentacion.UI_ResultadoAutorizacion;
+import presentacion.UI_ResultadoSalida;
+import presentacion.UI_RevisionSolicitud;
+import presentacion.UI_SignUp;
 
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -34,8 +42,6 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -44,26 +50,35 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 public final class AplicacionParqueadero {
-    private static final String COOKIE = "parqueadero";
-    private static final Duration DURACION_SESION = Duration.ofHours(8);
-    private static final int LIMITE_FORMULARIO = 8192;
-    private static final Map<String, String> TIPOS = Map.of(
+    private final String nombreCookie = "parqueadero";
+    private final Duration duracionSesion = Duration.ofHours(8);
+    private final int limiteFormulario = 8192;
+    private final Map<String, String> tipos = Map.of(
             "html", "text/html; charset=utf-8",
             "css", "text/css; charset=utf-8",
             "js", "text/javascript; charset=utf-8",
             "webmanifest", "application/manifest+json; charset=utf-8",
             "svg", "image/svg+xml",
             "png", "image/png");
-    private static final Set<String> ARCHIVOS_WEB = Set.of(
+    private final Set<String> archivosWeb = Set.of(
             "index.html", "app.js", "estilos.css", "qr.js", "vendor/jsQR.js",
             "manifest.webmanifest", "icono.svg", "icono-192.png", "icono-512.png",
             "icono-180.png", "codigos.html", "codigos.css", "qr-entrada.png", "qr-salida.png");
 
     private record Sesion(Usuario usuario, Instant vence) {}
 
-    private final Path web;
-    private final boolean cookieSegura;
+    private Path web;
+    private boolean cookieSegura;
     private final Map<String, Sesion> sesiones = new ConcurrentHashMap<>();
+    private final UI_Home inicio = new UI_Home();
+    private final UI_Login login = new UI_Login();
+    private final UI_SignUp registro = new UI_SignUp();
+    private final UI_FormularioSolicitud formulario = new UI_FormularioSolicitud();
+    private final UI_RevisionSolicitud revision = new UI_RevisionSolicitud();
+    private final UI_ResultadoAutorizacion resultadoAutorizacion = new UI_ResultadoAutorizacion();
+    private final UI_LecturaQR lectorQR = new UI_LecturaQR();
+    private final UI_Asignacion asignacion = new UI_Asignacion();
+    private final UI_ResultadoSalida resultadoSalida = new UI_ResultadoSalida();
 
     private final ServicioAcceso acceso;
     private final ServicioAutorizacion autorizacion;
@@ -74,10 +89,7 @@ public final class AplicacionParqueadero {
     private boolean administradorPreparado;
     private int siguienteSolicitud = 1;
 
-    AplicacionParqueadero(Path web, boolean cookieSegura) {
-        this.web = web;
-        this.cookieSegura = cookieSegura;
-
+    public AplicacionParqueadero() {
         UsuarioDAO usuarios = new UsuarioDAO();
         SolicitudDAO solicitudes = new SolicitudDAO();
         autorizaciones = new AutorizacionDAO();
@@ -90,12 +102,15 @@ public final class AplicacionParqueadero {
         salida = new ServicioSalida(constancias, espacios);
     }
 
-    public static void iniciar(String[] args) throws Exception {
-        Path web = args.length > 0 ? Path.of(args[0]).toAbsolutePath().normalize() : null;
-        if (web == null && recursoWeb(null, "index.html") == null) {
-            web = Path.of("web").toAbsolutePath().normalize();
+    public synchronized void iniciar(String[] args) throws Exception {
+        if (administradorPreparado) {
+            throw new IllegalStateException("La aplicación ya fue iniciada.");
         }
-        if (recursoWeb(web, "index.html") == null) {
+        Path carpetaWeb = args.length > 0 ? Path.of(args[0]).toAbsolutePath().normalize() : null;
+        if (carpetaWeb == null && recursoWeb(null, "index.html") == null) {
+            carpetaWeb = Path.of("web").toAbsolutePath().normalize();
+        }
+        if (recursoWeb(carpetaWeb, "index.html") == null) {
             throw new IOException("No se encontro web/index.html.");
         }
         String archivoTls = System.getenv("PARQUEADERO_TLS_ARCHIVO");
@@ -118,20 +133,28 @@ public final class AplicacionParqueadero {
             throw new IllegalArgumentException("Crea la clave de ADMIN en la terminal o configura PARQUEADERO_ADMIN_CLAVE.");
         }
         boolean proxyHttps = "true".equalsIgnoreCase(System.getenv("PARQUEADERO_PROXY_HTTPS"));
-        AplicacionParqueadero app = new AplicacionParqueadero(web, tls || proxyHttps);
-        app.prepararAdministrador(clave);
 
         InetSocketAddress direccion = new InetSocketAddress(host, puerto);
         HttpServer servidor = tls ? crearHttps(direccion, archivoTls) : HttpServer.create(direccion, 0);
-        servidor.createContext("/", app::atender);
-        servidor.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
-        servidor.start();
+        var ejecutor = Executors.newVirtualThreadPerTaskExecutor();
+        try {
+            web = carpetaWeb;
+            cookieSegura = tls || proxyHttps;
+            servidor.createContext("/", this::atender);
+            servidor.setExecutor(ejecutor);
+            prepararAdministrador(clave);
+            servidor.start();
+        } catch (RuntimeException | Error fallo) {
+            servidor.stop(0);
+            ejecutor.shutdown();
+            throw fallo;
+        }
         String ipMostrada = host.contains(":") ? "[" + host + "]" : host;
         System.out.printf("Parqueadero EPN activo en %s://%s:%d%n",
                 tls ? "https" : "http", ipMostrada, servidor.getAddress().getPort());
     }
 
-    private static HttpsServer crearHttps(InetSocketAddress direccion, String archivo) throws Exception {
+    private HttpsServer crearHttps(InetSocketAddress direccion, String archivo) throws Exception {
         String clave = System.getenv("PARQUEADERO_TLS_CLAVE");
         if (clave == null) {
             throw new IllegalArgumentException("Configura PARQUEADERO_TLS_CLAVE para el archivo PKCS12.");
@@ -177,7 +200,7 @@ public final class AplicacionParqueadero {
     private void api(HttpExchange intercambio, String recurso) throws IOException {
         String metodo = intercambio.getRequestMethod();
         if ("GET".equals(metodo) && "sesion".equals(recurso)) {
-            responder(intercambio, 200, datosSesion(usuarioActual(intercambio)));
+            responder(intercambio, 200, inicio.mostrarMenu(usuarioActual(intercambio)));
             return;
         }
         if (!"POST".equals(metodo)) {
@@ -194,22 +217,22 @@ public final class AplicacionParqueadero {
         switch (recurso) {
             case "registro" -> {
                 registrar(datos);
-                responder(intercambio, 201, Map.of("mensaje", "Cuenta creada. Ya puedes iniciar sesión."));
+                responder(intercambio, 201, registro.mostrarResultado());
                 return;
             }
             case "login" -> {
                 Usuario usuario = autenticar(datos.get("cedula"), datos.get("clave"));
                 if (usuario == null) {
-                    responder(intercambio, 401, Map.of("error", "La cédula o la clave son incorrectas."));
+                    responder(intercambio, 401, login.mostrarError());
                     return;
                 }
                 crearSesion(intercambio, usuario);
-                responder(intercambio, 200, datosSesion(usuario));
+                responder(intercambio, 200, inicio.mostrarMenu(usuario));
                 return;
             }
             case "logout" -> {
                 cerrarSesion(intercambio);
-                responder(intercambio, 200, datosSesion(null));
+                responder(intercambio, 200, inicio.mostrarMenu(null));
                 return;
             }
             default -> { }
@@ -224,8 +247,8 @@ public final class AplicacionParqueadero {
             case "consulta" -> consultar(usuario, leerId(datos));
             case "revision" -> consultarRevision(usuario, leerId(datos));
             case "decision" -> revisar(usuario, leerId(datos), datos.get("decision"), datos.get("motivo"));
-            case "ingreso" -> ingresar(usuario, datos.get("qr"), datos.get("placa"));
-            case "salida" -> salir(usuario, datos.get("qr"), datos.get("placa"));
+            case "ingreso" -> ingresar(usuario, lectorQR.leerQR(datos), datos.get("placa"));
+            case "salida" -> salir(usuario, lectorQR.leerQR(datos), datos.get("placa"));
             default -> null;
         };
         if (respuesta == null) {
@@ -235,13 +258,13 @@ public final class AplicacionParqueadero {
         responder(intercambio, 200, respuesta);
     }
 
-    private static Map<String, String> leerFormulario(HttpExchange intercambio) throws IOException {
+    private Map<String, String> leerFormulario(HttpExchange intercambio) throws IOException {
         String tipo = intercambio.getRequestHeaders().getFirst("Content-Type");
         if (tipo == null || !tipo.split(";", 2)[0].trim().equalsIgnoreCase("application/x-www-form-urlencoded")) {
             throw new IllegalArgumentException("Formato de formulario no válido.");
         }
-        byte[] bytes = intercambio.getRequestBody().readNBytes(LIMITE_FORMULARIO + 1);
-        if (bytes.length > LIMITE_FORMULARIO) {
+        byte[] bytes = intercambio.getRequestBody().readNBytes(limiteFormulario + 1);
+        if (bytes.length > limiteFormulario) {
             throw new IllegalArgumentException("El formulario es demasiado largo.");
         }
         Map<String, String> datos = new HashMap<>();
@@ -255,7 +278,7 @@ public final class AplicacionParqueadero {
         return datos;
     }
 
-    private static int leerId(Map<String, String> datos) {
+    private int leerId(Map<String, String> datos) {
         try {
             int id = Integer.parseInt(datos.getOrDefault("id", ""));
             if (id > 0) {
@@ -270,8 +293,8 @@ public final class AplicacionParqueadero {
         if (cabecera != null) {
             for (String parte : cabecera.split(";")) {
                 String cookie = parte.trim();
-                if (cookie.startsWith(COOKIE + "=")) {
-                    return cookie.substring(COOKIE.length() + 1);
+                if (cookie.startsWith(nombreCookie + "=")) {
+                    return cookie.substring(nombreCookie.length() + 1);
                 }
             }
         }
@@ -296,8 +319,8 @@ public final class AplicacionParqueadero {
         sesiones.remove(leerCookie(intercambio));
         sesiones.values().removeIf(sesion -> !ahora.isBefore(sesion.vence()));
         String id = UUID.randomUUID().toString();
-        sesiones.put(id, new Sesion(usuario, ahora.plus(DURACION_SESION)));
-        enviarCookie(intercambio, id, DURACION_SESION.toSeconds());
+        sesiones.put(id, new Sesion(usuario, ahora.plus(duracionSesion)));
+        enviarCookie(intercambio, id, duracionSesion.toSeconds());
     }
 
     private void cerrarSesion(HttpExchange intercambio) {
@@ -306,17 +329,8 @@ public final class AplicacionParqueadero {
     }
 
     private void enviarCookie(HttpExchange intercambio, String id, long segundos) {
-        intercambio.getResponseHeaders().set("Set-Cookie", COOKIE + "=" + id + "; Path=/; "
+        intercambio.getResponseHeaders().set("Set-Cookie", nombreCookie + "=" + id + "; Path=/; "
                 + "HttpOnly; SameSite=Strict; Max-Age=" + segundos + (cookieSegura ? "; Secure" : ""));
-    }
-
-    private static Map<String, Object> datosSesion(Usuario usuario) {
-        if (usuario == null) {
-            return Map.of("autenticado", false);
-        }
-        return Map.of("autenticado", true, "nombre", usuario.getNombre(), "cedula", usuario.getCedula(),
-                "tipoUsuario", usuario.getTipoUsuario(), "placa", usuario.getPlaca(),
-                "tipoVehiculo", usuario.getTipoVehiculo());
     }
 
     private void estatico(HttpExchange intercambio, String ruta) throws IOException {
@@ -326,13 +340,13 @@ public final class AplicacionParqueadero {
             return;
         }
         String nombre = "/".equals(ruta) ? "index.html" : ruta.substring(1);
-        if (!ARCHIVOS_WEB.contains(nombre)) {
+        if (!archivosWeb.contains(nombre)) {
             responder(intercambio, 404, Map.of("error", "Archivo no disponible."));
             return;
         }
         URL archivo = recursoWeb(web, nombre);
         int punto = nombre.lastIndexOf('.');
-        String tipo = punto < 0 ? null : TIPOS.get(nombre.substring(punto + 1));
+        String tipo = punto < 0 ? null : tipos.get(nombre.substring(punto + 1));
         if (tipo == null || archivo == null) {
             responder(intercambio, 404, Map.of("error", "Archivo no disponible."));
             return;
@@ -354,7 +368,7 @@ public final class AplicacionParqueadero {
         }
     }
 
-    private static URL recursoWeb(Path web, String nombre) throws IOException {
+    private URL recursoWeb(Path web, String nombre) throws IOException {
         if (web == null) {
             return AplicacionParqueadero.class.getResource("/web/" + nombre);
         }
@@ -362,7 +376,7 @@ public final class AplicacionParqueadero {
         return Files.isRegularFile(archivo) ? archivo.toUri().toURL() : null;
     }
 
-    private static void responder(HttpExchange intercambio, int estado, Map<String, ?> datos) throws IOException {
+    private void responder(HttpExchange intercambio, int estado, Map<String, ?> datos) throws IOException {
         byte[] respuesta = datos.entrySet().stream()
                 .map(par -> json(par.getKey()) + ":" + json(par.getValue()))
                 .collect(Collectors.joining(",", "{", "}")).getBytes(StandardCharsets.UTF_8);
@@ -371,7 +385,7 @@ public final class AplicacionParqueadero {
         intercambio.getResponseBody().write(respuesta);
     }
 
-    private static String json(Object dato) {
+    private String json(Object dato) {
         if (dato == null || dato instanceof Boolean || dato instanceof Number) {
             return String.valueOf(dato);
         }
@@ -389,7 +403,7 @@ public final class AplicacionParqueadero {
     }
 
     // Los servicios comparten sus listas entre las sesiones de los navegadores.
-    synchronized void prepararAdministrador(String clave) {
+    private void prepararAdministrador(String clave) {
         if (administradorPreparado) {
             throw new IllegalStateException("El administrador ya fue configurado.");
         }
@@ -402,37 +416,16 @@ public final class AplicacionParqueadero {
         administradorPreparado = true;
     }
 
-    synchronized void registrar(Map<String, String> datos) {
-        String cedula = requerido(datos.get("cedula"), "Ingrese su cédula.");
-        if ("ADMIN".equalsIgnoreCase(cedula)) {
-            throw new IllegalArgumentException("Ese identificador está reservado para el administrador.");
-        }
-        String nombre = requerido(datos.get("nombre"), "Ingrese su nombre.");
-        String tipoUsuario = requerido(datos.get("tipoUsuario"), "Seleccione MCP o VISITANTE.")
-                .toUpperCase(Locale.ROOT);
-        if (!"MCP".equals(tipoUsuario) && !"VISITANTE".equals(tipoUsuario)) {
-            throw new IllegalArgumentException("El tipo de usuario debe ser MCP o VISITANTE.");
-        }
-        String placa = requerido(datos.get("placa"), "Ingrese la placa.").toUpperCase(Locale.ROOT);
-        String tipoVehiculo = requerido(datos.get("tipoVehiculo"), "Seleccione MOTO o AUTOMOVIL.")
-                .toUpperCase(Locale.ROOT);
-        if (!"MOTO".equals(tipoVehiculo) && !"AUTOMOVIL".equals(tipoVehiculo)) {
-            throw new IllegalArgumentException("El tipo de vehículo debe ser MOTO o AUTOMOVIL.");
-        }
-
-        String clave = datos.get("clave");
-        validarClave(clave);
-        Usuario usuario = new Usuario(cedula, nombre, tipoUsuario, placa, tipoVehiculo);
+    public synchronized void registrar(Map<String, String> datos) {
+        Usuario usuario = registro.capturarDatosRegistro(datos);
+        String clave = registro.capturarClave(datos);
         if (!acceso.registrarUsuario(usuario, clave)) {
             throw new IllegalArgumentException("La cédula ya está registrada.");
         }
     }
 
-    synchronized Usuario autenticar(String cedula, String clave) {
-        String identificador = requerido(cedula, "Ingrese su cédula o el identificador ADMIN.");
-        if ("ADMIN".equalsIgnoreCase(identificador)) {
-            identificador = "ADMIN";
-        }
+    public synchronized Usuario autenticar(String cedula, String clave) {
+        String identificador = login.capturarCedula(cedula);
 
         //La sesión del servicio es transitoria. El navegador conserva su propia sesión HTTP.
         try {
@@ -442,18 +435,15 @@ public final class AplicacionParqueadero {
         }
     }
 
-    synchronized Map<String, Object> solicitar(Usuario usuario, String motivo) {
+    public synchronized Map<String, Object> solicitar(Usuario usuario, String motivo) {
         exigirUsuario(usuario);
-        boolean visitante = "VISITANTE".equals(usuario.getTipoUsuario());
-        String tipo = visitante ? "TEMPORAL" : "ORDINARIA";
-        String motivoVisita = visitante ? requerido(motivo, "Ingrese el motivo de su visita.") : "";
-        Solicitud solicitud = new Solicitud(siguienteSolicitud, usuario, tipo, motivoVisita);
+        Solicitud solicitud = formulario.recibirDatosSolicitud(usuario, siguienteSolicitud, motivo);
         autorizacion.registrarSolicitud(solicitud);
         siguienteSolicitud++;
-        return Map.of("id", solicitud.getIdSolicitud());
+        return formulario.mostrarConfirmacion(solicitud);
     }
 
-    synchronized Map<String, Object> consultar(Usuario usuario, int id) {
+    public synchronized Map<String, Object> consultar(Usuario usuario, int id) {
         exigirSesion(usuario);
         Solicitud solicitud = buscarSolicitud(id);
         if (!esAdministrador(usuario) && !usuario.getCedula().equals(solicitud.getIdentificacion())) {
@@ -462,72 +452,60 @@ public final class AplicacionParqueadero {
         return detalle(solicitud);
     }
 
-    synchronized Map<String, Object> consultarRevision(Usuario usuario, int id) {
+    public synchronized Map<String, Object> consultarRevision(Usuario usuario, int id) {
         exigirAdministrador(usuario);
         return detalle(buscarSolicitud(id));
     }
 
-    synchronized Map<String, Object> revisar(Usuario usuario, int id, String decision, String motivo) {
+    public synchronized Map<String, Object> revisar(Usuario usuario, int id, String decision, String motivo) {
         exigirAdministrador(usuario);
         Solicitud solicitud = buscarSolicitud(id);
         if (!"PENDIENTE".equals(solicitud.getEstado())) {
             throw new IllegalStateException("La solicitud ya fue revisada.");
         }
 
-        switch (requerido(decision, "Seleccione una decisión.")) {
+        switch (revision.registrarDecision(decision)) {
             case "APROBAR" -> autorizacion.emitirAutorizacion(solicitud);
             case "CORRECCION" -> autorizacion.solicitarCorreccion(solicitud,
-                    requerido(motivo, "Ingrese el motivo de la corrección."));
+                    revision.capturarMotivo(motivo, "Ingrese el motivo de la corrección."));
             case "RECHAZAR" -> autorizacion.rechazarSolicitud(solicitud,
-                    requerido(motivo, "Ingrese el motivo del rechazo."));
+                    revision.capturarMotivo(motivo, "Ingrese el motivo del rechazo."));
             default -> throw new IllegalArgumentException("Seleccione una decisión válida.");
         }
         return detalle(solicitud);
     }
 
-    synchronized Map<String, Object> ingresar(Usuario usuario, String qr, String placa) {
+    public synchronized Map<String, Object> ingresar(Usuario usuario, String qr, String placa) {
         exigirUsuario(usuario);
         if ("QR_ENTRADA".equals(qr)) {
             Autorizacion permiso = autorizaciones.buscarVigentePorUsuario(usuario.getCedula(), new Date());
             if (permiso != null && !coincidePlaca(permiso.getSolicitud().getPlaca(), placa)) {
-                return Map.of("estado", "PLACA_NO_COINCIDE",
-                        "mensaje", "La placa no coincide con la de la autorización.");
+                return asignacion.mostrarRechazo("PLACA_NO_COINCIDE", "La placa no coincide con la de la autorización.");
             }
         }
-        ResultadoIngreso resultado = ingreso.procesarIngreso(usuario, qr);
-        String estado = resultado.estado.name();
-
-        return switch (resultado.estado) {
-            case ASIGNADO -> Map.of("estado", estado,
-                    "espacio", resultado.constancia.getEspacio().getIdEspacio(),
-                    "mensaje", "Ingreso registrado.");
-            case QR_INVALIDO -> Map.of("estado", estado, "mensaje", "Código QR de entrada inválido.");
-            case SIN_AUTORIZACION -> Map.of("estado", estado, "mensaje", "El usuario no tiene una autorización vigente.");
-            case INGRESO_ACTIVO -> Map.of("estado", estado, "mensaje", "El usuario ya tiene un ingreso activo.");
-            case SIN_CUPO -> Map.of("estado", estado, "mensaje", "No hay espacios libres.");
-        };
+        return asignacion.mostrarResultado(ingreso.procesarIngreso(usuario, qr));
     }
 
-    synchronized Map<String, Object> salir(Usuario usuario, String qr, String placa) {
+    public synchronized Map<String, Object> salir(Usuario usuario, String qr, String placa) {
         exigirUsuario(usuario);
         if (!"QR_SALIDA".equals(qr)) {
-            return Map.of("estado", "QR_INVALIDO", "mensaje", "Código QR de salida inválido.");
+            return lectorQR.mostrarError();
         }
         Constancia constancia = constancias.buscarActiva(usuario.getCedula());
         if (constancia != null && !coincidePlaca(constancia.getUsuario().getPlaca(), placa)) {
-            return Map.of("estado", "PLACA_NO_COINCIDE", "mensaje", "La placa no coincide con la del ingreso.");
+            return resultadoSalida.mostrarError("PLACA_NO_COINCIDE", "La placa no coincide con la del ingreso.");
         }
         if (salida.procesarSalida(usuario)) {
-            return Map.of("estado", "SALIDA_REGISTRADA", "mensaje", "Salida registrada. Se liberó su espacio.");
+            return resultadoSalida.mostrarSalidaExitosa();
         }
-        return Map.of("estado", "SIN_INGRESO_ACTIVO", "mensaje", "No existe un ingreso activo.");
+        return resultadoSalida.mostrarError("SIN_INGRESO_ACTIVO", "No existe un ingreso activo.");
     }
 
-    private static boolean coincidePlaca(String placaRegistrada, String placaLeida) {
+    public boolean coincidePlaca(String placaRegistrada, String placaLeida) {
         return placaLeida != null && placaRegistrada.strip().equalsIgnoreCase(placaLeida.strip());
     }
 
-    private Solicitud buscarSolicitud(int id) {
+    public Solicitud buscarSolicitud(int id) {
         Solicitud solicitud = autorizacion.consultarSolicitud(id);
         if (solicitud == null) {
             throw new IllegalArgumentException("No existe una solicitud con ese número.");
@@ -535,61 +513,39 @@ public final class AplicacionParqueadero {
         return solicitud;
     }
 
-    private Map<String, Object> detalle(Solicitud solicitud) {
-        Map<String, Object> datos = new LinkedHashMap<>();
-        datos.put("id", solicitud.getIdSolicitud());
-        datos.put("tipo", solicitud.getTipoSolicitud());
-        datos.put("estado", solicitud.getEstado());
-        datos.put("observaciones", solicitud.getObservaciones());
-        datos.put("nombre", solicitud.getNombreSolicitante());
-        datos.put("cedula", solicitud.getIdentificacion());
-        datos.put("placa", solicitud.getPlaca());
-        datos.put("tipoVehiculo", solicitud.getTipoVehiculo());
-        datos.put("motivo", solicitud.getMotivoVisita());
-
+    public Map<String, Object> detalle(Solicitud solicitud) {
         Autorizacion permiso = autorizacion.consultarAutorizacion(solicitud.getIdSolicitud());
-        if (permiso != null) {
-            datos.put("codigo", permiso.getCodigo());
-            datos.put("fechaEmision", permiso.getFechaEmision().toInstant().toString());
-            datos.put("fechaExpiracion", permiso.getFechaFin().toInstant().toString());
-        }
-        return datos;
+        return resultadoAutorizacion.mostrarResultado(solicitud, permiso);
     }
 
-    private static boolean esAdministrador(Usuario usuario) {
+    public boolean esAdministrador(Usuario usuario) {
         return "ADMIN".equals(usuario.getTipoUsuario());
     }
 
-    private static void exigirSesion(Usuario usuario) {
+    public void exigirSesion(Usuario usuario) {
         if (usuario == null) {
             throw new IllegalStateException("Inicie sesión para continuar.");
         }
     }
 
-    private static void exigirAdministrador(Usuario usuario) {
+    public void exigirAdministrador(Usuario usuario) {
         exigirSesion(usuario);
         if (!esAdministrador(usuario)) {
             throw new IllegalStateException("Solo el administrador puede revisar solicitudes.");
         }
     }
 
-    private static void exigirUsuario(Usuario usuario) {
+    public void exigirUsuario(Usuario usuario) {
         exigirSesion(usuario);
         if (esAdministrador(usuario)) {
             throw new IllegalStateException("Ingrese como miembro o visitante para usar esta opción.");
         }
     }
 
-    private static void validarClave(String clave) {
+    public void validarClave(String clave) {
         if (clave == null || clave.isBlank()) {
             throw new IllegalArgumentException("Ingrese una clave.");
         }
     }
 
-    private static String requerido(String texto, String mensaje) {
-        if (texto == null || texto.isBlank()) {
-            throw new IllegalArgumentException(mensaje);
-        }
-        return texto.strip();
-    }
 }

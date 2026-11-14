@@ -2,53 +2,45 @@ package presentacion;
 
 import entidades.Usuario;
 import java.util.Locale;
-import java.util.Objects;
-import java.util.Scanner;
+import java.util.Map;
 
-//La vista de registro construye el usuario que la aplicacion entrega a ServicioAcceso.
-public class UI_SignUp {
-
-    private final Scanner entrada;
-
-    public UI_SignUp(Scanner entrada) {
-        this.entrada = Objects.requireNonNull(entrada);
-    }
-
-    public Usuario capturarDatosRegistro() {
-        String cedula = leerDato("Ingrese su cedula.");
-        String nombre = leerDato("Ingrese su nombre.");
-        String tipo = leerDato("Ingrese el tipo de usuario, MCP o VISITANTE.")
-                .toUpperCase(Locale.ROOT);
-
-        if (!"MCP".equals(tipo) && !"VISITANTE".equals(tipo)) {
-            throw new IllegalArgumentException("El tipo debe ser MCP o VISITANTE.");
+public final class UI_SignUp {
+    public Usuario capturarDatosRegistro(Map<String, String> datos) {
+        String cedula = leerDato(datos.get("cedula"), "Ingrese su cédula.");
+        if ("ADMIN".equalsIgnoreCase(cedula)) {
+            throw new IllegalArgumentException("Ese identificador está reservado para el administrador.");
         }
-
-        String placa = leerDato("Ingrese la placa del vehiculo.")
+        String nombre = leerDato(datos.get("nombre"), "Ingrese su nombre.");
+        String tipoUsuario = leerDato(datos.get("tipoUsuario"), "Seleccione MCP o VISITANTE.")
                 .toUpperCase(Locale.ROOT);
-        String tipoVehiculo = leerDato("Ingrese el tipo de vehiculo (CARRO, MOTO).")
-                .toUpperCase(Locale.ROOT);
-
-        return new Usuario(cedula, nombre, tipo, placa, tipoVehiculo);
-    }
-
-    public String capturarClave() {
-        System.out.println("Ingrese una clave para su cuenta.");
-        return entrada.nextLine();
-    }
-
-    public void mostrarResultado(String mensaje) {
-        System.out.println(mensaje);
-    }
-
-    private String leerDato(String mensaje) {
-        System.out.println(mensaje);
-        String valor = entrada.nextLine().trim();
-
-        if (valor.isEmpty()) {
-            throw new IllegalArgumentException("Complete el dato solicitado.");
+        if (!"MCP".equals(tipoUsuario) && !"VISITANTE".equals(tipoUsuario)) {
+            throw new IllegalArgumentException("El tipo de usuario debe ser MCP o VISITANTE.");
         }
+        String placa = leerDato(datos.get("placa"), "Ingrese la placa.").toUpperCase(Locale.ROOT);
+        String tipoVehiculo = leerDato(datos.get("tipoVehiculo"), "Seleccione MOTO o AUTOMOVIL.")
+                .toUpperCase(Locale.ROOT);
+        if (!"MOTO".equals(tipoVehiculo) && !"AUTOMOVIL".equals(tipoVehiculo)) {
+            throw new IllegalArgumentException("El tipo de vehículo debe ser MOTO o AUTOMOVIL.");
+        }
+        return new Usuario(cedula, nombre, tipoUsuario, placa, tipoVehiculo);
+    }
 
-        return valor;
+    public String capturarClave(Map<String, String> datos) {
+        String clave = datos.get("clave");
+        if (clave == null || clave.isBlank()) {
+            throw new IllegalArgumentException("Ingrese una clave.");
+        }
+        return clave;
+    }
+
+    public Map<String, Object> mostrarResultado() {
+        return Map.of("mensaje", "Cuenta creada. Ya puedes iniciar sesión.");
+    }
+
+    private String leerDato(String dato, String mensaje) {
+        if (dato == null || dato.isBlank()) {
+            throw new IllegalArgumentException(mensaje);
+        }
+        return dato.strip();
     }
 }
