@@ -1,16 +1,19 @@
 package presentacion;
 
+//La vista presenta el estado, las observaciones y el codigo que recibe de la aplicacion.
 public class UI_ResultadoAutorizacion {
 
     public void mostrarResultado(String estado) {
-        throw new UnsupportedOperationException("Pendiente de implementar");
+        System.out.println("Estado de la solicitud, " + estado + ".");
     }
 
+    //La aplicacion obtiene el motivo desde la solicitud revisada.
     public void mostrarObservaciones(String motivo) {
-        throw new UnsupportedOperationException("Pendiente de implementar");
+        System.out.println("Observacion, " + motivo + ".");
     }
 
+    //La aplicacion obtiene el codigo desde la autorizacion emitida.
     public void mostrarCodigo(String codigo) {
-        throw new UnsupportedOperationException("Pendiente de implementar");
+        System.out.println("Codigo de autorizacion, " + codigo + ".");
     }
 }
