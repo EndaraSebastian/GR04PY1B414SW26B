@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="es-EC">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#132e3e">
+    <meta name="description" content="Solicitudes, autorizaciones, ingreso y salida del Parqueadero EPN.">
+    <title>Parqueadero EPN</title>
+    <link rel="icon" href="/icono.svg" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/icono-180.png">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/estilos.css">
+</head>
+<body>
+    <a class="saltar" href="#app">Ir al contenido</a>
+    <header class="barra">
+        <div class="barra-interior">
+            <button id="marca-inicio" class="marca" type="button" aria-label="Parqueadero EPN, ir al inicio">
+                <img class="marca-icono" src="/icono.svg" alt="" width="42" height="42">
+                <span>Parqueadero <strong>EPN</strong></span>
+            </button>
+            <div class="barra-sesion">
+                <span id="sesion-usuario" class="barra-usuario" hidden></span>
+                <button id="cerrar-sesion" class="barra-salida" type="button" hidden>Cerrar sesión</button>
+            </div>
+        </div>
+    </header>
+    <main id="app" tabindex="-1">
+        <section class="pantalla">
+            <p role="status">Cargando Parqueadero EPN…</p>
+        </section>
+        <noscript><p class="aviso error">Habilita JavaScript en el navegador para utilizar el parqueadero.</p></noscript>
+    </main>
+    <script src="/vendor/jsQR.js"></script>
+    <script type="module" src="/app.js"></script>
+</body>
+</html>

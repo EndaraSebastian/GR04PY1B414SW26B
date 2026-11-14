@@ -37,6 +37,7 @@ public class ServicioAutorizacion {
             throw new IllegalArgumentException("La solicitud debe iniciar pendiente.");
         }
 
+        comprobarSinAutorizacionVigente(s, new Date());
         solicitudes.guardar(s);
     }
 
@@ -74,9 +75,11 @@ public class ServicioAutorizacion {
             throw new IllegalArgumentException("La solicitud no cumple las condiciones de aprobacion.");
         }
 
+        Date fechaEmision = new Date();
+        comprobarSinAutorizacionVigente(s, fechaEmision);
+
         int id = s.getIdSolicitud();
         String codigo = "AUT-" + id;
-        Date fechaEmision = new Date();
 
         //La demostracion usa un dia para visita y un anio para autorizacion ordinaria.
         int dias = "TEMPORAL".equals(s.getTipoSolicitud()) ? 1 : 365;
@@ -91,6 +94,12 @@ public class ServicioAutorizacion {
         s.resolver("APROBADA", "");
         solicitudes.actualizar(s);
         return a;
+    }
+
+    private void comprobarSinAutorizacionVigente(Solicitud s, Date fecha) {
+        if (autorizaciones.buscarVigentePorUsuario(s.getIdentificacion(), fecha) != null) {
+            throw new IllegalStateException("El usuario ya tiene una autorizacion vigente.");
+        }
     }
 
     public void rechazarSolicitud(Solicitud s, String motivo) {
