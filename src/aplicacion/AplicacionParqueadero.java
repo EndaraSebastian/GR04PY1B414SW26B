@@ -50,8 +50,9 @@ import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
 public final class AplicacionParqueadero {
+    //HTML, CSS, JS, manifest y recursos de imagen que se pueden servir desde la carpeta web.
     private final String nombreCookie = "parqueadero";
-    private final Duration duracionSesion = Duration.ofHours(8);
+    private final Duration duracionSesion = Duration.ofHours(48);
     private final int limiteFormulario = 8192;
     private final Map<String, String> tipos = Map.of(
             "html", "text/html; charset=utf-8",
@@ -65,11 +66,14 @@ public final class AplicacionParqueadero {
             "manifest.webmanifest", "icono.svg", "icono-192.png", "icono-512.png",
             "icono-180.png", "codigos.html", "codigos.css", "qr-entrada.png", "qr-salida.png");
 
+    // Las sesiones de los navegadores se guardan en memoria y expiran automáticamente.
     private record Sesion(Usuario usuario, Instant vence) {}
 
     private Path web;
     private boolean cookieSegura;
     private final Map<String, Sesion> sesiones = new ConcurrentHashMap<>();
+
+    // Las interfaces de usuario se encargan de capturar datos y mostrar resultados.
     private final UI_Home inicio = new UI_Home();
     private final UI_Login login = new UI_Login();
     private final UI_SignUp registro = new UI_SignUp();
@@ -80,6 +84,7 @@ public final class AplicacionParqueadero {
     private final UI_Asignacion asignacion = new UI_Asignacion();
     private final UI_ResultadoSalida resultadoSalida = new UI_ResultadoSalida();
 
+    // Los servicios de negocio se encargan de la lógica de la aplicación y usan los DAOs para acceder a los datos.
     private final ServicioAcceso acceso;
     private final ServicioAutorizacion autorizacion;
     private final ServicioIngreso ingreso;
@@ -87,8 +92,10 @@ public final class AplicacionParqueadero {
     private final AutorizacionDAO autorizaciones;
     private final ConstanciaDAO constancias;
     private boolean administradorPreparado;
+
     private int siguienteSolicitud = 1;
 
+    // Se crean los servicios y DAOs para que compartan sus listas entre las sesiones de los navegadores.
     public AplicacionParqueadero() {
         UsuarioDAO usuarios = new UsuarioDAO();
         SolicitudDAO solicitudes = new SolicitudDAO();
@@ -154,6 +161,164 @@ public final class AplicacionParqueadero {
                 tls ? "https" : "http", ipMostrada, servidor.getAddress().getPort());
     }
 
+    // Los servicios comparten sus listas entre las sesiones de los navegadores.
+    private void prepararAdministrador(String clave) {
+        if (administradorPreparado) {
+            throw new IllegalStateException("El administrador ya fue configurado.");
+        }
+
+        validarClave(clave);
+        Usuario administrador = new Usuario("ADMIN", "Administrador", "ADMIN", "", "");
+        if (!acceso.registrarUsuario(administrador, clave)) {
+            throw new IllegalStateException("No se pudo configurar al administrador.");
+        }
+        administradorPreparado = true;
+    }
+
+    // Los métodos sincronizados evitan que dos navegadores modifiquen la misma lista al mismo tiempo.
+    public synchronized void registrar(Map<String, String> datos) {
+        Usuario usuario = registro.capturarDatosRegistro(datos);
+        String clave = registro.capturarClave(datos);
+        if (!acceso.registrarUsuario(usuario, clave)) {
+            throw new IllegalArgumentException("La cédula ya está registrada.");
+        }
+    }
+
+    public synchronized Usuario autenticar(String cedula, String clave) {
+        String identificador = login.capturarCedula(cedula);
+
+        //La sesión del servicio es transitoria. El navegador conserva su propia sesión HTTP.
+        try {
+            return acceso.iniciarSesion(identificador, clave);
+        } finally {
+            acceso.cerrarSesion();
+        }
+    }
+
+    /**
+     * Map<String, Object> es un diccionario de pares clave-valor donde la clave es un String y el valor puede ser cualquier objeto.
+     * un diccionario de pares clave-valor es una estructura de datos que almacena información en forma de pares, donde cada par consta de una clave única y un valor asociado a esa clave.
+     * una clave es un identificador único que se utiliza para acceder al valor correspondiente en el diccionario. El valor puede ser cualquier tipo de dato, como un número, una cadena de texto, un objeto o incluso otro diccionario.
+     * en este caso es el String, y el valor es un Object, que es la clase base de todos los objetos en Java, lo que significa que puede contener cualquier tipo de dato.
+     * Sirve para enviar datos estructurados al navegador, como información de usuario, estado de solicitudes, resultados de operaciones, etc.
+     * En este caso, devuelve un Map con la información de la solicitud creada, que luego se convierte a JSON para enviarse al navegador.
+    */
+    public synchronized Map<String, Object> solicitar(Usuario usuario, String motivo) {
+        exigirUsuario(usuario);
+        Solicitud solicitud = formulario.recibirDatosSolicitud(usuario, siguienteSolicitud, motivo);
+        autorizacion.registrarSolicitud(solicitud);
+        siguienteSolicitud++;
+        return formulario.mostrarConfirmacion(solicitud);
+    }
+
+    public synchronized Map<String, Object> consultar(Usuario usuario, int id) {
+        exigirSesion(usuario);
+        Solicitud solicitud = buscarSolicitud(id);
+        if (!esAdministrador(usuario) && !usuario.getCedula().equals(solicitud.getIdentificacion())) {
+            throw new IllegalStateException("Esta solicitud pertenece a otro usuario.");
+        }
+        return detalle(solicitud);
+    }
+
+    public synchronized Map<String, Object> consultarRevision(Usuario usuario, int id) {
+        exigirAdministrador(usuario);
+        return detalle(buscarSolicitud(id));
+    }
+
+    public synchronized Map<String, Object> revisar(Usuario usuario, int id, String decision, String motivo) {
+        exigirAdministrador(usuario);
+        Solicitud solicitud = buscarSolicitud(id);
+        if (!"PENDIENTE".equals(solicitud.getEstado())) {
+            throw new IllegalStateException("La solicitud ya fue revisada.");
+        }
+
+        switch (revision.registrarDecision(decision)) {
+            case "APROBAR" -> autorizacion.emitirAutorizacion(solicitud);
+            case "CORRECCION" -> autorizacion.solicitarCorreccion(solicitud,
+                    revision.capturarMotivo(motivo, "Ingrese el motivo de la corrección."));
+            case "RECHAZAR" -> autorizacion.rechazarSolicitud(solicitud,
+                    revision.capturarMotivo(motivo, "Ingrese el motivo del rechazo."));
+            default -> throw new IllegalArgumentException("Seleccione una decisión válida.");
+        }
+        return detalle(solicitud);
+    }
+
+    public synchronized Map<String, Object> ingresar(Usuario usuario, String qr, String placa) {
+        exigirUsuario(usuario);
+        if ("QR_ENTRADA".equals(qr)) {
+            Autorizacion permiso = autorizaciones.buscarVigentePorUsuario(usuario.getCedula(), new Date());
+            if (permiso != null && !coincidePlaca(permiso.getSolicitud().getPlaca(), placa)) {
+                return asignacion.mostrarRechazo("PLACA_NO_COINCIDE", "La placa no coincide con la de la autorización.");
+            }
+        }
+        return asignacion.mostrarResultado(ingreso.procesarIngreso(usuario, qr));
+    }
+
+    public synchronized Map<String, Object> salir(Usuario usuario, String qr, String placa) {
+        exigirUsuario(usuario);
+        if (!"QR_SALIDA".equals(qr)) {
+            return lectorQR.mostrarError();
+        }
+        Constancia constancia = constancias.buscarActiva(usuario.getCedula());
+        if (constancia != null && !coincidePlaca(constancia.getUsuario().getPlaca(), placa)) {
+            return resultadoSalida.mostrarError("PLACA_NO_COINCIDE", "La placa no coincide con la del ingreso.");
+        }
+        if (salida.procesarSalida(usuario)) {
+            return resultadoSalida.mostrarSalidaExitosa();
+        }
+        return resultadoSalida.mostrarError("SIN_INGRESO_ACTIVO", "No existe un ingreso activo.");
+    }
+
+    public boolean coincidePlaca(String placaRegistrada, String placaLeida) {
+        return placaLeida != null && placaRegistrada.strip().equalsIgnoreCase(placaLeida.strip());
+    }
+
+    public void exigirAdministrador(Usuario usuario) {
+        exigirSesion(usuario);
+        if (!esAdministrador(usuario)) {
+            throw new IllegalStateException("Solo el administrador puede revisar solicitudes.");
+        }
+    }
+
+    //Otros métodos de utilidad para la aplicación, como buscar solicitudes, mostrar detalles, validar sesiones y claves, etc.
+    public Solicitud buscarSolicitud(int id) {
+        Solicitud solicitud = autorizacion.consultarSolicitud(id);
+        if (solicitud == null) {
+            throw new IllegalArgumentException("No existe una solicitud con ese número.");
+        }
+        return solicitud;
+    }
+
+    public Map<String, Object> detalle(Solicitud solicitud) {
+        Autorizacion permiso = autorizacion.consultarAutorizacion(solicitud.getIdSolicitud());
+        return resultadoAutorizacion.mostrarResultado(solicitud, permiso);
+    }
+
+    public boolean esAdministrador(Usuario usuario) {
+        return "ADMIN".equals(usuario.getTipoUsuario());
+    }
+
+    public void exigirSesion(Usuario usuario) {
+        if (usuario == null) {
+            throw new IllegalStateException("Inicie sesión para continuar.");
+        }
+    }
+    
+    public void exigirUsuario(Usuario usuario) {
+        exigirSesion(usuario);
+        if (esAdministrador(usuario)) {
+            throw new IllegalStateException("Ingrese como miembro o visitante para usar esta opción.");
+        }
+    }
+
+    public void validarClave(String clave) {
+        if (clave == null || clave.isBlank()) {
+            throw new IllegalArgumentException("Ingrese una clave.");
+        }
+    }
+
+
+    // Crea un servidor HTTPS con el certificado y clave PKCS12.
     private HttpsServer crearHttps(InetSocketAddress direccion, String archivo) throws Exception {
         String clave = System.getenv("PARQUEADERO_TLS_CLAVE");
         if (clave == null) {
@@ -400,152 +565,6 @@ public final class AplicacionParqueadero {
             }
         }
         return texto.append('"').toString();
-    }
-
-    // Los servicios comparten sus listas entre las sesiones de los navegadores.
-    private void prepararAdministrador(String clave) {
-        if (administradorPreparado) {
-            throw new IllegalStateException("El administrador ya fue configurado.");
-        }
-
-        validarClave(clave);
-        Usuario administrador = new Usuario("ADMIN", "Administrador", "ADMIN", "", "");
-        if (!acceso.registrarUsuario(administrador, clave)) {
-            throw new IllegalStateException("No se pudo configurar al administrador.");
-        }
-        administradorPreparado = true;
-    }
-
-    public synchronized void registrar(Map<String, String> datos) {
-        Usuario usuario = registro.capturarDatosRegistro(datos);
-        String clave = registro.capturarClave(datos);
-        if (!acceso.registrarUsuario(usuario, clave)) {
-            throw new IllegalArgumentException("La cédula ya está registrada.");
-        }
-    }
-
-    public synchronized Usuario autenticar(String cedula, String clave) {
-        String identificador = login.capturarCedula(cedula);
-
-        //La sesión del servicio es transitoria. El navegador conserva su propia sesión HTTP.
-        try {
-            return acceso.iniciarSesion(identificador, clave);
-        } finally {
-            acceso.cerrarSesion();
-        }
-    }
-
-    public synchronized Map<String, Object> solicitar(Usuario usuario, String motivo) {
-        exigirUsuario(usuario);
-        Solicitud solicitud = formulario.recibirDatosSolicitud(usuario, siguienteSolicitud, motivo);
-        autorizacion.registrarSolicitud(solicitud);
-        siguienteSolicitud++;
-        return formulario.mostrarConfirmacion(solicitud);
-    }
-
-    public synchronized Map<String, Object> consultar(Usuario usuario, int id) {
-        exigirSesion(usuario);
-        Solicitud solicitud = buscarSolicitud(id);
-        if (!esAdministrador(usuario) && !usuario.getCedula().equals(solicitud.getIdentificacion())) {
-            throw new IllegalStateException("Esta solicitud pertenece a otro usuario.");
-        }
-        return detalle(solicitud);
-    }
-
-    public synchronized Map<String, Object> consultarRevision(Usuario usuario, int id) {
-        exigirAdministrador(usuario);
-        return detalle(buscarSolicitud(id));
-    }
-
-    public synchronized Map<String, Object> revisar(Usuario usuario, int id, String decision, String motivo) {
-        exigirAdministrador(usuario);
-        Solicitud solicitud = buscarSolicitud(id);
-        if (!"PENDIENTE".equals(solicitud.getEstado())) {
-            throw new IllegalStateException("La solicitud ya fue revisada.");
-        }
-
-        switch (revision.registrarDecision(decision)) {
-            case "APROBAR" -> autorizacion.emitirAutorizacion(solicitud);
-            case "CORRECCION" -> autorizacion.solicitarCorreccion(solicitud,
-                    revision.capturarMotivo(motivo, "Ingrese el motivo de la corrección."));
-            case "RECHAZAR" -> autorizacion.rechazarSolicitud(solicitud,
-                    revision.capturarMotivo(motivo, "Ingrese el motivo del rechazo."));
-            default -> throw new IllegalArgumentException("Seleccione una decisión válida.");
-        }
-        return detalle(solicitud);
-    }
-
-    public synchronized Map<String, Object> ingresar(Usuario usuario, String qr, String placa) {
-        exigirUsuario(usuario);
-        if ("QR_ENTRADA".equals(qr)) {
-            Autorizacion permiso = autorizaciones.buscarVigentePorUsuario(usuario.getCedula(), new Date());
-            if (permiso != null && !coincidePlaca(permiso.getSolicitud().getPlaca(), placa)) {
-                return asignacion.mostrarRechazo("PLACA_NO_COINCIDE", "La placa no coincide con la de la autorización.");
-            }
-        }
-        return asignacion.mostrarResultado(ingreso.procesarIngreso(usuario, qr));
-    }
-
-    public synchronized Map<String, Object> salir(Usuario usuario, String qr, String placa) {
-        exigirUsuario(usuario);
-        if (!"QR_SALIDA".equals(qr)) {
-            return lectorQR.mostrarError();
-        }
-        Constancia constancia = constancias.buscarActiva(usuario.getCedula());
-        if (constancia != null && !coincidePlaca(constancia.getUsuario().getPlaca(), placa)) {
-            return resultadoSalida.mostrarError("PLACA_NO_COINCIDE", "La placa no coincide con la del ingreso.");
-        }
-        if (salida.procesarSalida(usuario)) {
-            return resultadoSalida.mostrarSalidaExitosa();
-        }
-        return resultadoSalida.mostrarError("SIN_INGRESO_ACTIVO", "No existe un ingreso activo.");
-    }
-
-    public boolean coincidePlaca(String placaRegistrada, String placaLeida) {
-        return placaLeida != null && placaRegistrada.strip().equalsIgnoreCase(placaLeida.strip());
-    }
-
-    public Solicitud buscarSolicitud(int id) {
-        Solicitud solicitud = autorizacion.consultarSolicitud(id);
-        if (solicitud == null) {
-            throw new IllegalArgumentException("No existe una solicitud con ese número.");
-        }
-        return solicitud;
-    }
-
-    public Map<String, Object> detalle(Solicitud solicitud) {
-        Autorizacion permiso = autorizacion.consultarAutorizacion(solicitud.getIdSolicitud());
-        return resultadoAutorizacion.mostrarResultado(solicitud, permiso);
-    }
-
-    public boolean esAdministrador(Usuario usuario) {
-        return "ADMIN".equals(usuario.getTipoUsuario());
-    }
-
-    public void exigirSesion(Usuario usuario) {
-        if (usuario == null) {
-            throw new IllegalStateException("Inicie sesión para continuar.");
-        }
-    }
-
-    public void exigirAdministrador(Usuario usuario) {
-        exigirSesion(usuario);
-        if (!esAdministrador(usuario)) {
-            throw new IllegalStateException("Solo el administrador puede revisar solicitudes.");
-        }
-    }
-
-    public void exigirUsuario(Usuario usuario) {
-        exigirSesion(usuario);
-        if (esAdministrador(usuario)) {
-            throw new IllegalStateException("Ingrese como miembro o visitante para usar esta opción.");
-        }
-    }
-
-    public void validarClave(String clave) {
-        if (clave == null || clave.isBlank()) {
-            throw new IllegalArgumentException("Ingrese una clave.");
-        }
     }
 
 }
