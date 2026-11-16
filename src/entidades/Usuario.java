@@ -47,7 +47,7 @@ public class Usuario {
     }
 
     //ServicioAcceso establece el hash cuando registra al usuario.
-    public void establecerClaveHash(String claveHash) {
+    public void setClaveHash(String claveHash) {
         this.claveHash = claveHash;
     }
 }
