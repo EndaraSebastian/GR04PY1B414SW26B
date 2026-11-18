@@ -38,7 +38,7 @@ public class ServicioAcceso {
         String salGuardada = codificador.encodeToString(sal);
         String hashGuardado = codificador.encodeToString(derivarClave(clave, sal));
 
-        u.establecerClaveHash(salGuardada + "." + hashGuardado);
+        u.setClaveHash(salGuardada + "." + hashGuardado);
         usuarios.guardar(u);
         return true;
     }
